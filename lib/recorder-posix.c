@@ -39,7 +39,6 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #define _XOPEN_SOURCE 500
-#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <unistd.h>
