@@ -46,6 +46,19 @@ else()
     message(STATUS, "MPI not found")
 endif()
 
+find_package(ZLIB REQUIRED)
+if(ZLIB_FOUND)
+    include_directories(${ZLIB_INCLUDE_DIRS})
+    set(RECORDER_EXT_INCLUDE_DEPENDENCIES ${ZLIB_INCLUDE_DIRS}
+            ${RECORDER_EXT_INCLUDE_DEPENDENCIES}
+            )
+    set(RECORDER_EXT_LIB_DEPENDENCIES
+            ${ZLIB_LIBRARIES} ${RECORDER_EXT_LIB_DEPENDENCIES})
+else()
+    message(STATUS, "ZLIB not found")
+endif()
+
+
 #------------------------------------------------------------------------------
 # Libraries
 #------------------------------------------------------------------------------
