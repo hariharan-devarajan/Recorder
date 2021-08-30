@@ -319,13 +319,13 @@ inline int RECORDER_POSIX_DECL(symlinkat)(const char *path1, int fd, const char 
     char** args = assemble_args_list(3, realrealpath(path1), itoa(fd), realrealpath(path2));
     RECORDER_INTERCEPTOR(3, args);
 }
-inline ssize_t RECORDER_POSIX_DECL(readlink)(const char *path, char *buf, size_t bufsize) {
+ssize_t RECORDER_POSIX_DECL(readlink)(const char *path, char *buf, size_t bufsize) {
     RECORDER_INTERCEPTOR_NOIO(int, readlink, (path, buf, bufsize));
     char** args = assemble_args_list(3, realrealpath(path), ptoa(buf), itoa(bufsize));
     RECORDER_INTERCEPTOR(3, args);
 }
 
-inline ssize_t RECORDER_POSIX_DECL(readlinkat)(int fd, const char *path, char *buf, size_t bufsize) {
+ssize_t RECORDER_POSIX_DECL(readlinkat)(int fd, const char *path, char *buf, size_t bufsize) {
     RECORDER_INTERCEPTOR_NOIO(int, readlinkat, (fd, path, buf, bufsize));
     char** args = assemble_args_list(4, itoa(fd), realrealpath(path), ptoa(buf), itoa(bufsize));
     RECORDER_INTERCEPTOR(4, args);
