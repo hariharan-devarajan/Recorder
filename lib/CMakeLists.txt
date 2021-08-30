@@ -73,8 +73,6 @@ target_include_directories(recorder
         )
 
 target_link_libraries(recorder
-        PUBLIC _LARGEFILE64_SOURCE
-        PUBLIC RECORDER_PRELOAD
         PUBLIC ${HDF5_LIBRARIES}
         PUBLIC ${MPI_C_LIBRARIES}
         PUBLIC pthread
@@ -82,6 +80,8 @@ target_link_libraries(recorder
         )
 
 target_compile_definitions(recorder
+        PUBLIC _LARGEFILE64_SOURCE
+        PUBLIC RECORDER_PRELOAD
         PRIVATE $<$<BOOL:${RECORDER_DISABLE_POSIX_TRACE}>:DISABLE_POSIX_TRACE>
         PRIVATE $<$<BOOL:${RECORDER_DISABLE_MPIO_TRACE}>:DISABLE_MPIO_TRACE>
         PRIVATE $<$<BOOL:${RECORDER_DISABLE_HDF5_TRACE}>:DISABLE_HDF5_TRACE>
