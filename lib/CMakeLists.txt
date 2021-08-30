@@ -3,8 +3,6 @@
 #------------------------------------------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_LARGEFILE64_SOURCE -DRECORDER_PRELOAD")
-
 #------------------------------------------------------------------------------
 # Set sources
 #------------------------------------------------------------------------------
@@ -38,12 +36,12 @@ endif()
 
 find_package(MPI REQUIRED)
 if(MPI_FOUND)
-    include_directories(${MPI_INCLUDE_DIRS})
-    set(RECORDER_EXT_INCLUDE_DEPENDENCIES ${MPI_INCLUDE_DIRS}
+    include_directories(${MPI_CXX_INCLUDE_DIRS})
+    set(RECORDER_EXT_INCLUDE_DEPENDENCIES ${MPI_C_INCLUDE_DIRS}
             ${RECORDER_EXT_INCLUDE_DEPENDENCIES}
             )
     set(RECORDER_EXT_LIB_DEPENDENCIES
-            ${MPI_LIBRARIES} ${RECORDER_EXT_LIB_DEPENDENCIES})
+            ${MPI_C_LIBRARIES} ${RECORDER_EXT_LIB_DEPENDENCIES})
 else()
     message(STATUS, "MPI not found")
 endif()
@@ -62,7 +60,10 @@ target_include_directories(recorder
         )
 
 target_link_libraries(recorder
+        PUBLIC _LARGEFILE64_SOURCE
+        PUBLIC RECORDER_PRELOAD
         PUBLIC ${HDF5_LIBRARIES}
+        PUBLIC ${MPI_C_LIBRARIES}
         PUBLIC pthread
         PRIVATE $<$<BOOL:${HERMES_COMMUNICATION_MPI}>:MPI::MPI_CXX>
         )
