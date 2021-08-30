@@ -126,7 +126,7 @@ inline int RECORDER_POSIX_DECL(creat)(const char *path, mode_t mode) {
     RECORDER_INTERCEPTOR(2, args);
 }
 
-inline int RECORDER_POSIX_DECL(open)(const char *path, int flags, ...) {
+int RECORDER_POSIX_DECL(open)(const char *path, int flags, ...) {
     if (flags & O_CREAT) {
         va_list arg;
         va_start(arg, flags);
@@ -177,7 +177,7 @@ inline int RECORDER_POSIX_DECL(__fxstat)(int vers, int fd, struct stat *buf) {
     RECORDER_INTERCEPTOR(3, args);
 }
 
-inline ssize_t RECORDER_POSIX_DECL(pread)(int fd, void *buf, size_t count, off_t offset) {
+ssize_t RECORDER_POSIX_DECL(pread)(int fd, void *buf, size_t count, off_t offset) {
     RECORDER_INTERCEPTOR_NOIO(ssize_t, pread, (fd, buf, count, offset));
     char** args = assemble_args_list(4, itoa(fd), ptoa(buf), itoa(count), itoa(offset));
     RECORDER_INTERCEPTOR(4, args);
@@ -212,7 +212,7 @@ inline ssize_t RECORDER_POSIX_DECL(writev)(int fd, const struct iovec *iov, int 
     RECORDER_INTERCEPTOR(3, args);
 }
 
-inline size_t RECORDER_POSIX_DECL(fread)(void *ptr, size_t size, size_t nmemb, FILE *stream) {
+size_t RECORDER_POSIX_DECL(fread)(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     RECORDER_INTERCEPTOR_NOIO(size_t, fread, (ptr, size, nmemb, stream));
     char** args = assemble_args_list(4, ptoa(ptr), itoa(size), itoa(nmemb), stream2fdstr(stream));
     RECORDER_INTERCEPTOR(4, args);
@@ -228,7 +228,7 @@ inline size_t RECORDER_POSIX_DECL(fwrite)(const void *ptr, size_t size, size_t n
     RECORDER_INTERCEPTOR(4, args);
 }
 
-inline int RECORDER_POSIX_DECL(fprintf)(FILE *stream, const char *format, ...) {
+int RECORDER_POSIX_DECL(fprintf)(FILE *stream, const char *format, ...) {
     // Get the size of the string fprintf will write
     va_list fprintf_args;
     va_start(fprintf_args, format);
@@ -242,7 +242,7 @@ inline int RECORDER_POSIX_DECL(fprintf)(FILE *stream, const char *format, ...) {
     RECORDER_INTERCEPTOR(2, args);
 }
 
-inline ssize_t RECORDER_POSIX_DECL(read)(int fd, void *buf, size_t count) {
+ssize_t RECORDER_POSIX_DECL(read)(int fd, void *buf, size_t count) {
     RECORDER_INTERCEPTOR_NOIO(ssize_t, read, (fd, buf, count));
     char** args = assemble_args_list(3, itoa(fd), ptoa(buf), itoa(count));
     RECORDER_INTERCEPTOR(3, args);
@@ -274,7 +274,7 @@ inline off_t RECORDER_POSIX_DECL(lseek)(int fd, off_t offset, int whence) {
 
 
 /* Below are non File-I/O related function calls */
-inline char* RECORDER_POSIX_DECL(getcwd)(char *buf, size_t size) {
+char* RECORDER_POSIX_DECL(getcwd)(char *buf, size_t size) {
     RECORDER_INTERCEPTOR_NOIO(char*, getcwd, (buf, size));
     char** args = assemble_args_list(2, ptoa(buf), itoa(size));
     RECORDER_INTERCEPTOR(2, args);
