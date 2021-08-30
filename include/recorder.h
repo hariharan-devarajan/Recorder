@@ -56,6 +56,7 @@
 #include "uthash.h"
 #include "recorder-utils.h"
 #include "recorder-log-format.h"
+#include <dlfcn.h>
 
 #define __D_MPI_REQUEST MPIO_Request
 #if MPI_VERSION >= 3
