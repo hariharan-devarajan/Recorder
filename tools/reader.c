@@ -86,10 +86,8 @@ Record* read_records(char* path, RecorderLocalDef* RLD, RecorderGlobalDef *RGD) 
     fseek(fp, 0, SEEK_END);
     long fsize = ftell(fp);
     fseek(fp, 0, SEEK_SET);
-
     char *content = (char*)malloc(fsize);
     fread(content, 1, fsize, fp);
-
 
     long args_start_pos = 0;
     long rec_start_pos = 0;
@@ -129,6 +127,7 @@ Record* read_records(char* path, RecorderLocalDef* RLD, RecorderGlobalDef *RGD) 
             memcpy(arguments_str, content+args_start_pos, len-1);
             arguments_str[len-1] = 0;
             r->args = get_record_arguments(arguments_str, r->arg_count);
+            printf("%s\n",arguments_str);
             free(arguments_str);
         }
     }
