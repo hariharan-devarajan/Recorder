@@ -102,9 +102,11 @@ void handle_one_record(Record* record, void* arg) {
     writer->tstartBuilder.Append(record->tstart);
     writer->tendBuilder.Append(record->tend);
     bool user_func = (record->func_id == RECORDER_USER_FUNCTION);
-    const char* func_name = recorder_get_func_name(&reader, record->func_id);
+    char* func_name;
     if(user_func)
-        func_name = record->args[0]; 
+	func_name = "RECORDER_USER_FUNCTION";
+    else
+    	func_name = recorder_get_func_name(&reader, record->func_id);
     writer->func_idBuilder.Append(func_name);
     writer->arg_countBuilder.Append(record->arg_count);
 
