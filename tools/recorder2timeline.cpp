@@ -28,8 +28,12 @@ void write_to_json(Record *record, void* arg) {
         bool user_func = (record->func_id == RECORDER_USER_FUNCTION);
         const char *func_name = recorder_get_func_name(&reader, record);
 
-        if (user_func)
-            func_name = record->args[0];
+        int arg_count = record->arg_count;
+        if (user_func) {
+            func_name = record->args[1];
+            arg_count--;
+        }
+
         uint64_t ts = uint64_t(record->tstart / reader.metadata.time_resolution);
         int tid = record->tid;
         uint64_t dur = uint64_t((record->tend - record->tstart) / reader.metadata.time_resolution);
@@ -43,7 +47,7 @@ void write_to_json(Record *record, void* arg) {
             ss  << "\",\"ph\":\"X\""<< ""
                 << ",\"dur\":"      << dur;
         ss  <<",\"args\":\"";
-        for (int arg_id = 0; !user_func && arg_id < record->arg_count; arg_id++) {
+        for (int arg_id = 0; !arg_id < arg_count; arg_id++) {
             char *arg = record->args[arg_id];
             ss  << " " << arg;
         }

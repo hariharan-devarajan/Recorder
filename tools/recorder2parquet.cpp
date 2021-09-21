@@ -113,8 +113,8 @@ void handle_one_record(Record* record, void* arg) {
     writer->tendBuilder.Append(record->tend);
     int cat = recorder_get_func_type(&reader, record);
     if (cat == RECORDER_FTRACE){
-        writer->func_idBuilder.Append(record->args[0]);
-        record->arg_count = 0;
+        writer->func_idBuilder.Append(record->args[1]);
+        record->arg_count = 1;
     }else {
         writer->func_idBuilder.Append(recorder_get_func_name(&reader, record));
     }
