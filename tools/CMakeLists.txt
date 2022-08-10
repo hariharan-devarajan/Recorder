@@ -106,6 +106,25 @@ if(RECORDER_ENABLE_PARQUET)
             ARCHIVE DESTINATION ${RECORDER_INSTALL_LIB_DIR}
             RUNTIME DESTINATION ${RECORDER_INSTALL_BIN_DIR}
     )
+
+    add_executable(recorder2parquet-workflow-vani recorder2parquetworkflow_vani.cpp)
+    target_link_libraries(recorder2parquet-workflow-vani
+            PUBLIC ${MPI_C_LIBRARIES}
+            reader
+            arrow_shared
+            parquet_shared
+            -lstdc++fs
+            )
+    add_dependencies(recorder2parquet-workflow-vani reader)
+    install(
+            TARGETS
+            recorder2parquet-workflow-vani
+            EXPORT
+            ${RECORDER_EXPORTED_TARGETS}
+            LIBRARY DESTINATION ${RECORDER_INSTALL_LIB_DIR}
+            ARCHIVE DESTINATION ${RECORDER_INSTALL_LIB_DIR}
+            RUNTIME DESTINATION ${RECORDER_INSTALL_BIN_DIR}
+    )
 endif()
 
 
