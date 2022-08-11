@@ -107,6 +107,7 @@ if(RECORDER_ENABLE_PARQUET)
             RUNTIME DESTINATION ${RECORDER_INSTALL_BIN_DIR}
     )
 
+    find_package(nlohmann_json 3.10.5 REQUIRED)
     add_executable(recorder2parquet-workflow-vani recorder2parquetworkflow_vani.cpp)
     target_link_libraries(recorder2parquet-workflow-vani
             PUBLIC ${MPI_C_LIBRARIES}
@@ -114,6 +115,7 @@ if(RECORDER_ENABLE_PARQUET)
             arrow_shared
             parquet_shared
             -lstdc++fs
+            nlohmann_json::nlohmann_json
             )
     add_dependencies(recorder2parquet-workflow-vani reader)
     install(

@@ -12,7 +12,10 @@
 #include <map>
 #include <experimental/filesystem>
 #include <iostream>
+#include <nlohmann/json.hpp>
+#include <fstream>
 namespace fs = std::experimental::filesystem;
+
 
 std::vector<std::string> split(const std::string& s, char delimiter) {
    std::vector<std::string> tokens;
@@ -98,6 +101,7 @@ public:
     }
 };
 
+
 struct ParquetWriter {
     Directory directory;
     int rank;
@@ -117,9 +121,18 @@ struct ParquetWriter {
     int64_t row_group = 0;
     ParquetWriter(char* _path);
     void finish();
+    float max_tend;
+    std::unordered_set<std::string> unique_filenames;
+    std::unordered_set<std::string> unique_processes;
+    uint64_t sum_transfer_size;
+    double sum_bandwidth;
+    uint64_t record_count;
 };
 
-ParquetWriter::ParquetWriter(char* _path) {
+ParquetWriter::ParquetWriter(char* _path):unique_filenames(),
+                                max_tend(0), unique_processes(),
+                                sum_transfer_size(0),sum_bandwidth(0),
+                                record_count(0)   {
     row_group = 0;
     base_file = _path;
     schema = arrow::schema(
@@ -240,7 +253,8 @@ int64_t get_size(Record* record) {
     const char* fwrite_condition = strstr(func_name, "fwrite");
     const char* read_condition = strstr(func_name, "read");
     const char* write_condition = strstr(func_name, "write");
-    if(read_condition && !fread_condition) return atol(record->args[2]);
+    const char* readdir_condition = strstr(func_name, "readdir");
+    if(read_condition && !fread_condition && !readdir_condition) return atol(record->args[2]);
     if(fread_condition) return atol(record->args[2]);
     if(write_condition && !fwrite_condition) return atol(record->args[2]);
     if(fwrite_condition) return atol(record->args[2]);
@@ -253,13 +267,8 @@ int64_t get_count(Record* record) {
         return 0;
     }
     const char* func_name = recorder_get_func_name(&reader, record);
-    const char* open_condition = strstr(func_name, "open");
-    const char* mpi_condition = strstr(func_name, "MPI");
-    const char* close_condition = strstr(func_name, "close");
     const  char* fread_condition = strstr(func_name, "fread");
     const  char* fwrite_condition = strstr(func_name, "fwrite");
-    const  char* read_condition = strstr(func_name, "read");
-    const  char* write_condition = strstr(func_name, "write");
     if(fread_condition) return atol(record->args[1]);
     if(fwrite_condition) return atol(record->args[1]);
     return 1;
@@ -274,6 +283,16 @@ void handle_one_record(Record* record, void* arg) {
     size = size * count;
     double bandwidth = size * 1.0 / duration;
     double tmid = (record->tend + record->tstart) / 2.0;
+
+    if (writer->max_tend < record->tend) writer->max_tend = record->tend;
+    writer->unique_filenames.emplace(std::string(filename));
+    writer->unique_processes.emplace(std::string(writer->directory.hostname) + "-" +
+                                        std::to_string(writer->directory.proc_id) + "-" +
+                                        std::to_string(writer->rank) + "-" +
+                                        std::to_string(record->tid));
+    writer->sum_transfer_size += size;
+    writer->sum_bandwidth += bandwidth;
+    writer->record_count ++;
 
     writer->durationBuilder.Append(duration);
     writer->filenameBuilder.Append(filename);
@@ -465,6 +484,41 @@ int main(int argc, char **argv) {
             prev = completed;
         }
     }
+//    if (writer->max_tend < record->tend) writer->max_tend = record->tend;
+//    writer->unique_filenames.emplace(std::string(filename));
+//    writer->unique_processes.emplace(RankIndex(writer->directory.hostname, writer->directory.proc_id));
+//    writer->sum_transfer_size += size;
+//    writer->sum_bandwidth += bandwidth;
+//    writer->record_count ++;
+    double global_max_tend;
+    MPI_Reduce(&writer.max_tend, &global_max_tend, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    unsigned long total_transfer_size;
+    MPI_Reduce(&writer.sum_transfer_size, &total_transfer_size, 1, MPI_UNSIGNED_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    double total_bandwidth;
+    MPI_Reduce(&writer.sum_bandwidth, &total_bandwidth, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    unsigned long total_count;
+    MPI_Reduce(&writer.record_count, &total_count, 1, MPI_UNSIGNED_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    using json = nlohmann::json;
+    if(mpi_rank == 0) {
+        json j = {{"max_tend", global_max_tend},
+                  {"total_bandwidth", total_bandwidth},
+                  {"total_count", total_count},
+                  {"total_transfer_size", total_transfer_size}};
+        char global_json[256];
+        sprintf(global_json, "%s/_parquet/global.json", argv[1]);
+        std::ofstream out(global_json);
+        out << j;
+        out.close();
+    }
+    char rank_json[256];
+    sprintf(rank_json, "%s/_parquet/rank_%d.json", argv[1],mpi_rank);
+    json j;
+    j["filenames"] = writer.unique_filenames;
+    j["unique_processes"] = writer.unique_processes;
+    std::ofstream out(rank_json);
+    out << j;
+    out.close();
+    printf("[Recorder] Written Json file by rank %d\n", mpi_rank);
     writer.finish();
     MPI_Barrier(MPI_COMM_WORLD);
     MPI_Finalize();
