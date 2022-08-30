@@ -14,6 +14,8 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <fstream>
+
+#include <codecvt>
 namespace fs = std::experimental::filesystem;
 
 
@@ -128,7 +130,6 @@ struct ParquetWriter {
     double sum_bandwidth;
     uint64_t record_count;
 };
-
 ParquetWriter::ParquetWriter(char* _path):unique_filenames(),
                                 max_tend(0), unique_processes(),
                                 sum_transfer_size(0),sum_bandwidth(0),
@@ -273,7 +274,103 @@ int64_t get_count(Record* record) {
     if(fwrite_condition) return atol(record->args[1]);
     return 1;
 }
+void trim_utf8(std::string& hairy) {
+    std::vector<bool> results;
+    std::string smooth;
+    size_t len = hairy.size();
+    results.reserve(len);
+    smooth.reserve(len);
+    const unsigned char *bytes = (const unsigned char *) hairy.c_str();
 
+    auto read_utf8 = [](const unsigned char *bytes, size_t len, size_t *pos) -> unsigned {
+        int code_unit1 = 0;
+        int code_unit2, code_unit3, code_unit4;
+
+        if (*pos >= len) goto ERROR1;
+        code_unit1 = bytes[(*pos)++];
+
+        if (code_unit1 < 0x80) return code_unit1;
+        else if (code_unit1 < 0xC2) goto ERROR1; // continuation or overlong 2-byte sequence
+        else if (code_unit1 < 0xE0) {
+            if (*pos >= len) goto ERROR1;
+            code_unit2 = bytes[(*pos)++]; //2-byte sequence
+            if ((code_unit2 & 0xC0) != 0x80) goto ERROR2;
+            return (code_unit1 << 6) + code_unit2 - 0x3080;
+        }
+        else if (code_unit1 < 0xF0) {
+            if (*pos >= len) goto ERROR1;
+            code_unit2 = bytes[(*pos)++]; // 3-byte sequence
+            if ((code_unit2 & 0xC0) != 0x80) goto ERROR2;
+            if (code_unit1 == 0xE0 && code_unit2 < 0xA0) goto ERROR2; // overlong
+            if (*pos >= len) goto ERROR2;
+            code_unit3 = bytes[(*pos)++];
+            if ((code_unit3 & 0xC0) != 0x80) goto ERROR3;
+            return (code_unit1 << 12) + (code_unit2 << 6) + code_unit3 - 0xE2080;
+        }
+        else if (code_unit1 < 0xF5) {
+            if (*pos >= len) goto ERROR1;
+            code_unit2 = bytes[(*pos)++]; // 4-byte sequence
+            if ((code_unit2 & 0xC0) != 0x80) goto ERROR2;
+            if (code_unit1 == 0xF0 && code_unit2 <  0x90) goto ERROR2; // overlong
+            if (code_unit1 == 0xF4 && code_unit2 >= 0x90) goto ERROR2; // > U+10FFFF
+            if (*pos >= len) goto ERROR2;
+            code_unit3 = bytes[(*pos)++];
+            if ((code_unit3 & 0xC0) != 0x80) goto ERROR3;
+            if (*pos >= len) goto ERROR3;
+            code_unit4 = bytes[(*pos)++];
+            if ((code_unit4 & 0xC0) != 0x80) goto ERROR4;
+            return (code_unit1 << 18) + (code_unit2 << 12) + (code_unit3 << 6) + code_unit4 - 0x3C82080;
+        }
+        else goto ERROR1; // > U+10FFFF
+
+        ERROR4:
+        (*pos)--;
+        ERROR3:
+        (*pos)--;
+        ERROR2:
+        (*pos)--;
+        ERROR1:
+        return code_unit1 + 0xDC00;
+    };
+
+    unsigned c;
+    size_t pos = 0;
+    size_t pos_before;
+    size_t inc = 0;
+    bool valid;
+
+    for (;;) {
+        pos_before = pos;
+        c = read_utf8(bytes, len, &pos);
+        inc = pos - pos_before;
+        if (!inc) break; // End of string reached.
+
+        valid = false;
+
+        if ( (                 c <= 0x00007F)
+             ||   (c >= 0x000080 && c <= 0x0007FF)
+             ||   (c >= 0x000800 && c <= 0x000FFF)
+             ||   (c >= 0x001000 && c <= 0x00CFFF)
+             ||   (c >= 0x00D000 && c <= 0x00D7FF)
+             ||   (c >= 0x00E000 && c <= 0x00FFFF)
+             ||   (c >= 0x010000 && c <= 0x03FFFF)
+             ||   (c >= 0x040000 && c <= 0x0FFFFF)
+             ||   (c >= 0x100000 && c <= 0x10FFFF) ) valid = true;
+
+        if (c >= 0xDC00 && c <= 0xDCFF) {
+            valid = false;
+        }
+
+        do results.push_back(valid); while (--inc);
+    }
+
+    size_t sz = results.size();
+    for (size_t i = 0; i < sz; ++i) {
+        if (results[i]) smooth.append(1, hairy.at(i));
+    }
+
+    hairy.swap(smooth);
+}
 void handle_one_record(Record* record, void* arg) {
     ParquetWriter *writer = (ParquetWriter*) arg;
     double duration = record->tend - record->tstart;
@@ -285,7 +382,9 @@ void handle_one_record(Record* record, void* arg) {
     double tmid = (record->tend + record->tstart) / 2.0;
 
     if (writer->max_tend < record->tend) writer->max_tend = record->tend;
-    writer->unique_filenames.emplace(std::string(filename));
+    std::string file = std::string(filename);
+    trim_utf8(file);
+    writer->unique_filenames.emplace(file);
     writer->unique_processes.emplace(std::string(writer->directory.hostname) + "-" +
                                         std::to_string(writer->directory.proc_id) + "-" +
                                         std::to_string(writer->rank) + "-" +
@@ -295,7 +394,7 @@ void handle_one_record(Record* record, void* arg) {
     writer->record_count ++;
 
     writer->durationBuilder.Append(duration);
-    writer->filenameBuilder.Append(filename);
+    writer->filenameBuilder.Append(file);
     writer->sizeBuilder.Append(size);
     writer->bandwidthBuilder.Append(bandwidth);
     writer->tmidBuilder.Append(tmid);
@@ -490,6 +589,18 @@ int main(int argc, char **argv) {
 //    writer->sum_transfer_size += size;
 //    writer->sum_bandwidth += bandwidth;
 //    writer->record_count ++;
+    using json = nlohmann::json;
+    char rank_json[256];
+    sprintf(rank_json, "%s/_parquet/rank_%d.json", argv[1],mpi_rank);
+    json j;
+
+    j["filenames"] = writer.unique_filenames;
+    j["processes"] = writer.unique_processes;
+
+    std::ofstream out(rank_json);
+    out << j;
+    out.close();
+    printf("[Recorder] Written Json file by rank %d\n", mpi_rank);
     double global_max_tend;
     MPI_Reduce(&writer.max_tend, &global_max_tend, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     unsigned long total_transfer_size;
@@ -498,7 +609,7 @@ int main(int argc, char **argv) {
     MPI_Reduce(&writer.sum_bandwidth, &total_bandwidth, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     unsigned long total_count;
     MPI_Reduce(&writer.record_count, &total_count, 1, MPI_UNSIGNED_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
-    using json = nlohmann::json;
+
     if(mpi_rank == 0) {
         json j = {{"max_tend", global_max_tend},
                   {"total_bandwidth", total_bandwidth},
@@ -509,16 +620,9 @@ int main(int argc, char **argv) {
         std::ofstream out(global_json);
         out << j;
         out.close();
+        printf("[Recorder] Written Global Json file by rank %d\n", mpi_rank);
     }
-    char rank_json[256];
-    sprintf(rank_json, "%s/_parquet/rank_%d.json", argv[1],mpi_rank);
-    json j;
-    j["filenames"] = writer.unique_filenames;
-    j["unique_processes"] = writer.unique_processes;
-    std::ofstream out(rank_json);
-    out << j;
-    out.close();
-    printf("[Recorder] Written Json file by rank %d\n", mpi_rank);
+
     writer.finish();
     MPI_Barrier(MPI_COMM_WORLD);
     MPI_Finalize();
