@@ -2,6 +2,8 @@
 #include <sys/time.h>   // for gettimeofday()
 #include <stdarg.h>     // for va_list, va_start and va_end
 #include <assert.h>
+#include <errno.h>
+#include <math.h>
 #include "recorder.h"
 #include "recorder-utils.h"
 
@@ -89,18 +91,18 @@ char** read_prefix_list(const char* path) {
 
 void utils_init() {
     log_pointer = false;
-    const char* s = getenv("RECORDER_LOG_POINTER");
+    const char* s = getenv(RECORDER_LOG_POINTER);
     if(s)
         log_pointer = atoi(s);
 
     exclusion_prefix = NULL;
     inclusion_prefix = NULL;
 
-    const char *exclusion_fname = getenv("RECORDER_EXCLUSION_FILE");
+    const char *exclusion_fname = getenv(RECORDER_EXCLUSION_FILE);
     if(exclusion_fname)
         exclusion_prefix = read_prefix_list(exclusion_fname);
 
-    const char *inclusion_fname = getenv("RECORDER_INCLUSION_FILE");
+    const char *inclusion_fname = getenv(RECORDER_INCLUSION_FILE);
     if(inclusion_fname)
         inclusion_prefix = read_prefix_list(inclusion_fname);
 }
@@ -186,9 +188,9 @@ inline double recorder_wtime(void) {
 }
 
 /* Integer to stirng */
-inline char* itoa(size_t val) {
+inline char* itoa(off64_t val) {
     char *str = calloc(32, sizeof(char));
-    sprintf(str, "%ld", val);
+    sprintf(str, "%lld", val);
     return str;
 }
 
@@ -283,6 +285,29 @@ inline char* realrealpath(const char *path) {
     return res;
 }
 
+/**
+ * Like mkdir() but also create parent directory
+ * if not exists
+ */
+int mkpath(char* file_path, mode_t mode) {
+
+    MAP_OR_FAIL(mkdir);
+
+    assert(file_path && *file_path);
+
+    for (char* p = strchr(file_path + 1, '/'); p; p = strchr(p + 1, '/')) {
+        *p = '\0';
+        if (RECORDER_REAL_CALL(mkdir)(file_path, mode) == -1) {
+            if (errno != EEXIST) {
+                *p = '/';
+                return -1;
+            }
+        }
+        *p = '/';
+    }
+    return 0;
+}
+
 int min_in_array(int* arr, size_t len) {
     int min_val = arr[0];
     for(int i = 1; i < len; i++) {
@@ -290,5 +315,17 @@ int min_in_array(int* arr, size_t len) {
             min_val = arr[i];
     }
     return min_val;
+}
+
+
+double recorder_log2(int val) {
+    return log(val)/log(2);
+}
+
+
+int recorder_ceil(double val) {
+    int tmp = (int) val;
+    if(val > tmp)
+        return tmp + 1;
 }
 

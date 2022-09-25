@@ -45,6 +45,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdarg.h>
 #include <dirent.h>
 #include <utime.h>
 #include <fcntl.h>
@@ -55,7 +56,7 @@
 #include "hdf5.h"
 #include "uthash.h"
 #include "recorder-utils.h"
-#include "recorder-log-format.h"
+#include "recorder-logger.h"
 
 #define __D_MPI_REQUEST MPIO_Request
 #if MPI_VERSION >= 3
@@ -64,18 +65,18 @@
 #define CONST
 #endif
 
+/* List of runtime environment variables */
+#define RECORDER_WITH_NON_MPI       "RECORDER_WITH_NON_MPI"
+#define RECORDER_TRACES_DIR         "RECORDER_TRACES_DIR"
+#define RECORDER_BUFFER_SIZE        "RECORDER_BUFFER_SIZE"
+#define RECORDER_TIME_RESOLUTION    "RECORDER_TIME_RESOLUTION"
+#define RECORDER_LOG_POINTER        "RECORDER_LOG_POINTER"
+#define RECORDER_LOG_TID            "RECORDER_LOG_TID"
+#define RECORDER_LOG_LEVEL          "RECORDER_LOG_LEVEL"
+#define RECORDER_EXCLUSION_FILE     "RECORDER_EXCLUSION_FILE"
+#define RECORDER_INCLUSION_FILE     "RECORDER_INCLUSION_FILE"
 
-/* logger.c */
-void logger_init(int rank, int nprocs);
-void logger_finalize();
-bool logger_initialized();
-void logger_record_enter(Record *record);
-void logger_record_exit(Record *record);
-void free_record(Record *record);
 
-// TODO only used by ftrace logger
-// Need to see how to replace it with process_one_record()
-void write_record(Record* record);
 
 #ifdef RECORDER_PRELOAD
     #include <dlfcn.h>
@@ -110,26 +111,33 @@ void write_record(Record* record);
  * Decide wether to intercept (override) funciton calls
  */
 #ifdef RECORDER_PRELOAD
-    #ifndef DISABLE_MPIO_TRACE
-        #define RECORDER_MPI_DECL(func) func
-    #else
-        #define RECORDER_MPI_DECL(func) __warp_##func
-    #endif
-
-    #ifndef DISABLE_POSIX_TRACE
+    #ifdef RECORDER_ENABLE_POSIX_TRACE
         #define RECORDER_POSIX_DECL(func) func
     #else
         #define RECORDER_POSIX_DECL(func) __warp_##func
     #endif
 
-    #ifndef DISABLE_HDF5_TRACE
+    #ifdef RECORDER_ENABLE_MPI_TRACE
+        #define RECORDER_MPI_DECL(func) func
+    #else
+        #define RECORDER_MPI_DECL(func) __warp_##func
+    #endif
+
+    #ifdef RECORDER_ENABLE_MPIIO_TRACE
+        #define RECORDER_MPIIO_DECL(func) func
+    #else
+        #define RECORDER_MPIIO_DECL(func) __warp_##func
+    #endif
+
+    #ifdef RECORDER_ENABLE_HDF5_TRACE
         #define RECORDER_HDF5_DECL(func) func
     #else
         #define RECORDER_HDF5_DECL(func) __warp_##func
     #endif
 #else
-    #define RECORDER_MPI_DECL(func) func
     #define RECORDER_POSIX_DECL(func) func
+    #define RECORDER_MPI_DECL(func) func
+    #define RECORDER_MPIIO_DECL(func) func
     #define RECORDER_HDF5_DECL(func) func
 #endif
 
@@ -202,6 +210,7 @@ RECORDER_FORWARD_DECL(fopen64, FILE *, (const char *path, const char *mode));
 RECORDER_FORWARD_DECL(fclose, int, (FILE * fp));
 RECORDER_FORWARD_DECL(fread, size_t, (void *ptr, size_t size, size_t nmemb, FILE *stream));
 RECORDER_FORWARD_DECL(fwrite, size_t, (const void *ptr, size_t size, size_t nmemb, FILE *stream));
+RECORDER_FORWARD_DECL(fflush, int, (FILE *stream));
 RECORDER_FORWARD_DECL(ftell, long, (FILE *stream));
 RECORDER_FORWARD_DECL(fseek, int, (FILE * stream, long offset, int whence));
 RECORDER_FORWARD_DECL(fsync, int, (int fd));

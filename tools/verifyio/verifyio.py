@@ -8,14 +8,12 @@ from gen_networkx import generate_graph, has_path, graph_node_key, run_vector_cl
 def check_posix_semantics(G, pairs):
     properly_synchronized = True
 
-    print("Conflicting pairs: %d" %len(pairs))
     for pair in pairs:
         n1 = graph_node_key(pair[0])
         n2 = graph_node_key(pair[1])
         reachable = has_path(G, n1, n2) or has_path(G, n1, n2)
         if not reachable: properly_synchronized = False
-        if not properly_synchronized:
-            print("Conflicting I/O operations: %s <--> %s, properly synchronized: %s %s %s" %(n1, n2, properly_synchronized))
+        print("Conflicting I/O operations: %s <--> %s, properly synchronized: %s" %(n1, n2, reachable))
 
     return properly_synchronized
 
@@ -52,7 +50,6 @@ def print_shortest_path(G, src, dst, nodes):
 def check_mpi_semantics(G, nodes, pairs):
     properly_synchronized = True
 
-    print("Conflicting pairs: %d" %len(pairs))
     for pair in pairs:
         p1, p2 = pair[0], pair[1]                   # of Call class
         if p1.rank == p2.rank: continue             # Same rank conflicts do no cause a issue on most file systems.
@@ -87,6 +84,7 @@ def check_mpi_semantics(G, nodes, pairs):
         src = None if not next_sync else graph_node_key(next_sync)
         dst = None if not prev_sync else graph_node_key(prev_sync)
         reachable = (bool) ( (next_sync and prev_sync) and has_path(G, src, dst) )
+        if not reachable: properly_synchronized = False
         print("%s --> %s, properly synchronized: %s" %(graph_node_key(pair[0]), graph_node_key(pair[1]), reachable))
 
         if reachable:
@@ -114,7 +112,7 @@ if __name__ == "__main__":
     t1 = time.time()
     nodes, edges = match_mpi_calls(reader, sync_calls_only)
     t2 = time.time()
-    print(t2-t1)
+    #print(t2-t1)
 
     # Add the I/O nodes (conflicting I/O accesses)
     # to the graph. We add them after the match()
@@ -130,6 +128,7 @@ if __name__ == "__main__":
         total_nodes += len(nodes[rank])
 
 
+    print("Building happens-before graph")
     G = generate_graph(nodes, edges, include_vc=False)
     print("Nodes: %d, Edges: %d" %(len(G.nodes()), len(G.edges())))
 
@@ -137,8 +136,12 @@ if __name__ == "__main__":
     # run_vector_clock(G)
 
     if args.conflicts_file:
-        print("\nUse %s semantics" %args.semantics)
         if sync_calls_only:
-            check_mpi_semantics(G, nodes, pairs)
+            p = check_mpi_semantics(G, nodes, pairs)
         else:
-            check_posix_semantics(G, pairs)
+            p = check_posix_semantics(G, pairs)
+
+        if p:
+            print("\nProperly synchronized under %s semantics" %args.semantics)
+        else:
+            print("\nNot properly synchronized under %s semantics" %args.semantics)

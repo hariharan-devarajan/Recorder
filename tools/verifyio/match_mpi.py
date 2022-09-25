@@ -1,4 +1,5 @@
 import sys
+import gen_nodes
 from gen_nodes import VerifyIOContext
 
 edges = []
@@ -43,14 +44,15 @@ def get_translation_table(reader):
 
             if comm_id:
                 if comm_id not in translate:
-                    translate[comm_id] = range(reader.GM.total_ranks)
+                    translate[comm_id] = list(range(reader.GM.total_ranks))
                 translate[comm_id][local_rank] = world_rank
     return translate
 
 # Local rank to global rank
 def local2global(translate_table, comm_id, local_rank):
+    comm = comm_id.decode() if isinstance(comm_id, bytes) else comm_id
     if local_rank >= 0:
-        return translate_table[comm_id][local_rank]
+        return translate_table[comm][local_rank]
     # ANY_SOURCE
     return local_rank
 
@@ -196,9 +198,6 @@ def match_mpi_calls(reader, mpi_sync_calls=False):
 
     context = VerifyIOContext(reader, mpi_sync_calls)
     context.generate_mpi_nodes(reader, translate)
-
-    for rank in range(context.num_ranks):
-        print("Rank: %d, recv calls: %d, send calls: %d" %(rank, len(context.recv_calls[rank]), context.send_calls[rank]))
 
     for rank in range(context.num_ranks):
         for node in context.all_calls[rank]:

@@ -14,12 +14,14 @@ void testfunc3() {
 
 
 int main(int argc, char *argv[]) {
+
     MPI_Init(&argc, &argv);
 
     int world_size;
 
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
 
     MPI_Comm comm = MPI_COMM_WORLD;
     //MPI_Comm_dup(MPI_COMM_WORLD, &comm);
@@ -67,22 +69,22 @@ int main(int argc, char *argv[]) {
     int flag, idx;
     if(world_size > 1) {
         if (rank == 0) {
+            MPI_Send(sbuf, scount, MPI_BYTE, 1, 0, MPI_COMM_WORLD);
+            MPI_Send(sbuf, scount, MPI_BYTE, 1, 0, MPI_COMM_WORLD);
+        } else if(rank == 1){
             MPI_Request req[2];
             int finished[2];
-            MPI_Isend(sbuf, scount, MPI_BYTE, 1, 0, MPI_COMM_WORLD, &req[0]);
-            MPI_Isend(sbuf, scount, MPI_BYTE, 1, 0, MPI_COMM_WORLD, &req[1]);
-            //MPI_Waitall(2, req, MPI_STATUSES_IGNORE);
+            MPI_Irecv(rbuf, scount, MPI_BYTE, 0, 0, MPI_COMM_WORLD, &req[0]);
+            MPI_Irecv(rbuf, scount, MPI_BYTE, 0, 0, MPI_COMM_WORLD, &req[1]);
             MPI_Testsome(2, req, &idx, finished, MPI_STATUSES_IGNORE);
             MPI_Testany(2, req, &idx, &flag, MPI_STATUS_IGNORE);
             MPI_Testall(2, req, &flag, MPI_STATUSES_IGNORE);
-        } else if(rank == 1){
-            MPI_Recv(rbuf, scount, MPI_BYTE, 0, 0, MPI_COMM_WORLD, &status);
-            MPI_Recv(rbuf, scount, MPI_BYTE, 0, 0, MPI_COMM_WORLD, &status);
         }
     }
 
     MPI_Request req;
     MPI_Bcast(a, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
     //MPI_Ibcast(a, 1, MPI_INT, 0, MPI_COMM_WORLD, &req);
     //MPI_Wait(&req, MPI_STATUS_IGNORE);
     //MPI_Test(&req, &flag, MPI_STATUS_IGNORE);
@@ -99,6 +101,5 @@ int main(int argc, char *argv[]) {
     testfunc3();
 
     MPI_Finalize();
-
     return 0;
 }

@@ -25,7 +25,8 @@ There are two ways to build and install Recorder. The first way is to build Reco
 
  - MPI
  - HDF5
- - Arrow (optional) > 5.0.0
+ - Arrow (optional) > 5.0.0 - Needed for building Parquet convertor.
+ - CUDA (optional) - Needed for CUDA kernels interception.
 
 *Note that Recorder and the applications you intend to trace must be compiled with the same version of HDF5 and MPI.*
 
@@ -53,9 +54,10 @@ cmake ..                                                          \
 
 (2) Enable/disable tracing levels
 
-By default, Recorde traces function calls from all levels: HDF5, MPI and POSIX. The following options can be used to enable/disable specific levels.
+By default, Recorde traces function calls from all levels: HDF5, MPI, MPI-IO and POSIX. The following options can be used to enable/disable specific levels.
  * -DRECORDER_ENABLE_POSIX_TRACE=[ON|FF]
- * -DRECORDER_ENABLE_MPIO_TRACE=[ON|FF]
+ * -DRECORDER_ENABLE_MPI_TRACE=[ON|FF]
+ * -DRECORDER_ENABLE_MPIIO_TRACE=[ON|FF]
  * -DRECORDER_ENABLE_HDF5_TRACE=[ON|FF]
 
 (3) Intercepting `fcntl()` call: 
@@ -63,9 +65,15 @@ By default, Recorde traces function calls from all levels: HDF5, MPI and POSIX. 
 Since v2.1.7, `fcntl(int fd, int cmd, ...)` is intercepted. The commands (2nd argument) defined in POSIX standard
 are supported. If non-POSIX commands were used, please disable fcntl tracing at configure time with `-DRECORDER_ENABLE_FCNTL_TRACE=OFF`.
 
-(4) Parquet Converter
+(4) Intercepting CUDA kernels:
 
-TODO: Add doc.
+add `-DRECORDER_ENABLE_CUDA_TRACE=ON` to cmake to allow tracing CUDA kernels.
+
+(5) Parquet Converter
+
+add `-DRECORDER_ENABLE_PARQUET=ON` to cmake to build the Parquet format converter
+
+
 
 
 **Features Controled by Environment Variables**
@@ -103,14 +111,29 @@ Recorder by default does not log the pointers (memory addresses) as they provide
 cost a lot of space to store.
 However, you can change this behaviour by setting the enviroment variable `RECORDER_LOG_POINTER` to 1.
 
-(3) Location to write traces:
+(3) Storing thread ids
+
+Use `RECORDER_LOG_TID`(0 or 1) to control whether to store thread id. Default is 1.
+
+(4) Storing call levels
+
+Use `RECORDER_LOG_LEVEL` (0 or 1) to control whether to store call levels. Default is 1.
+
+(5) Location to write traces:
 
 By default Recorder will output the traces to the current working directory.
 You can use the enviroment variable `RECORDER_TRACES_DIR` to specifiy the path where you want the traces stored.
 Make sure that every process has the persmission to write to that directory. 
 
+(6) Buffer size
+
+Timestamps are buffered internally to avoid frequent disk I/O. Use `RECORDER_BUFFER_SIZE` (in MB) to set 
+the size of this buffer. The default value is 1MB.
+
 
 ### 2. Building Recorder with Spack
+
+*NOTE: please do not use Spack to install Recorder for now. The version there is outdated, we will update it soon.*
 
 For now, building Recorder with Spack provides less flexibility. We will add the CMake options for spack as well.
 
@@ -128,14 +151,20 @@ spack install recorder~hdf5~mpi
 
 Assume `$RECORDER_ROOT` is the location where you installed Recorder.
 
-**1. Generate traces.**
+**1. Generate traces**
 
 ```bash
-LD_PRELOAD=$RECORDER_ROOT/lib/librecorder.so mpirun -np N ./your_app
+# For MPI programs
+mpirun -np N -env LD_PRELOAD $RECORDER_ROOT/lib/librecorder.so ./your_app
+
+# For non-MPI programs or programs that may spwan non-mpi children programs
+RECORDER_WITH_NON_MPI=1 LD_PRELOAD=$RECORDER_ROOT/lib/librecorder.so ./your_app
 ```
 mpirun can be changed to your workload manager, e.g. srun.
 
-The trace files will be written to the current directory.
+The trace files will be written to the current directory under a folder named `hostname-username-appname-pid-starttime`. 
+
+*Note: In some systems (e.g., Quartz at LLNL), Darshan is deployed system-widely. Recorder does not work with Darshan. Please make sure darhsn is disabled and your application is not linked with the darshan library (use ldd to check).*
 
 **2. Human-readable traces**
 
@@ -155,7 +184,25 @@ We provide a Python library, [recorder-viz](https://pypi.org/project/recorder-vi
 It can be used to automatically generate detailed visuazation reports, or can be used to directly access the traces information. 
 -->
 
-## APIs for post-processing
+
+## Post-processing and Visualization
+
+**1. recorder-viz**
+
+We developed a Python library, [recorder-viz](https://github.com/wangvsa/recorder-viz), for post-processing and visualizations.
+Once installed, run the following command to generate the visualization report.
+```bash
+python $RECORDER_DIR/tools/reporter/reporter.py /path/to/your_trace_folder/
+```
+**2. Format Converters**
+
+We also provide two format converters `recorder2parquet` and `recorder2timeline`. They will be placed under $RECORDER_ROOT/bin directory after installation.
+
+- `recorder2parquet` will convert Recorder traces into a single [Parquet](https://parquet.apache.org) formata file. The Apache Parquet format is a well-known format that is supported by many analysis tools.
+
+- `recorder2timeline` will conver Recorder traces into [Chromium](https://www.chromium.org/developers/how-tos/trace-event-profiling-tool/trace-event-reading) trace format files. You can upload them to [https://ui.perfetto.dev](https://ui.perfetto.dev) for an interactive visualization.
+
+**3. C APIs**
 
 TODO: we have C APIs (tools/reader.h). Need to doc them.
 
@@ -163,6 +210,9 @@ TODO: we have C APIs (tools/reader.h). Need to doc them.
 ## Dataset
 
 [Traces from 17 HPC applications](https://doi.org/10.6075/J0Z899X4)
+
+The traces were collected using an old version of Recorder. The current version uses a different trace format.
+To read those traces please use Recorder 2.2.1 from the [release](https://github.com/uiuc-hpc/Recorder/releases/tag/v2.2.1) page.
 
 
 Publications
@@ -177,6 +227,19 @@ Publications
 
 Change Log
 ----------
+
+**Recorder 2.3.3** Jan 21, 2022
+1. Still require a RECORDER\_WITH\_NON\_MPI hint for non-mpi programs.
+2. Add a singal handler to intercept SIGTERM and SIGINT.
+3. Allow setting buffer size
+
+**Recorder 2.3.2** Jan 18, 2022
+1. Can handle both MPI and non-MPI programs without user hint.
+2. Can handle fork() + exec() workflows.
+
+**Recorder 2.3.1** Nov 30, 2021
+1. Separate MPI and MPI-IO.
+2. Updated conflict detector to use the latest reader code.
 
 **Recorder 2.3.0** Sep 15, 2021
 1. Adopt pilgrim copmerssion algorithm.
