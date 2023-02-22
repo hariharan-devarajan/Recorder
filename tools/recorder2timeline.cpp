@@ -83,7 +83,7 @@ void write_to_json(Record *record, void* arg) {
                 sep = ",";
             }
             ss  << "],";
-        }
+       }
         ss << "\"tend\": \"" << record->tend << "\"}}";
         writer->outFile << ss.rdbuf();
         writer->sep = ",\n";
