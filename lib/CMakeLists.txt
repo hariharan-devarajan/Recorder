@@ -1,14 +1,14 @@
 #------------------------------------------------------------------------------
 # Include source and build directories
 #------------------------------------------------------------------------------
-include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../include)
 
 #------------------------------------------------------------------------------
 # Set sources
 #------------------------------------------------------------------------------
 set(RECORDER_SRCS
-        ${CMAKE_SOURCE_DIR}/include/recorder.h
-        ${CMAKE_SOURCE_DIR}/include/recorder-sequitur.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/recorder.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/recorder-sequitur.h
         ${CMAKE_CURRENT_SOURCE_DIR}/recorder-hdf5.c
         ${CMAKE_CURRENT_SOURCE_DIR}/recorder-logger.c
         ${CMAKE_CURRENT_SOURCE_DIR}/recorder-cst-cfg.c

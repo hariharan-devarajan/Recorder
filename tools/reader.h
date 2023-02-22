@@ -1,7 +1,7 @@
 #ifndef _RECORDER_READER_H_
 #define _RECORDER_READER_H_
 #include <stdbool.h>
-#include "recorder-logger.h"
+#include <recorder-logger.h>
 
 // keep in sync with VERSION_STR in lib/recorder-logger.c
 // equal (major, minor) is needed for compatibility

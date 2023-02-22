@@ -1,7 +1,7 @@
 #------------------------------------------------------------------------------
 # Include source and build directories
 #------------------------------------------------------------------------------
-include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../include)
 
 
 #------------------------------------------------------------------------------
@@ -93,46 +93,6 @@ if(RECORDER_ENABLE_PARQUET)
         LIBRARY DESTINATION ${RECORDER_INSTALL_LIB_DIR}
         ARCHIVE DESTINATION ${RECORDER_INSTALL_LIB_DIR}
         RUNTIME DESTINATION ${RECORDER_INSTALL_BIN_DIR}
-    )
-
-    add_executable(recorder2parquet-workflow recorder2parquetworkflow.cpp)
-    target_link_libraries(recorder2parquet-workflow
-            PUBLIC ${MPI_C_LIBRARIES}
-            reader
-            arrow_shared
-            parquet_shared
-            -lstdc++fs
-            )
-    add_dependencies(recorder2parquet-workflow reader)
-    install(
-            TARGETS
-            recorder2parquet-workflow
-            EXPORT
-            ${RECORDER_EXPORTED_TARGETS}
-            LIBRARY DESTINATION ${RECORDER_INSTALL_LIB_DIR}
-            ARCHIVE DESTINATION ${RECORDER_INSTALL_LIB_DIR}
-            RUNTIME DESTINATION ${RECORDER_INSTALL_BIN_DIR}
-    )
-
-    find_package(nlohmann_json 3.10.5 REQUIRED)
-    add_executable(recorder2parquet-workflow-vani recorder2parquetworkflow_vani.cpp)
-    target_link_libraries(recorder2parquet-workflow-vani
-            PUBLIC ${MPI_C_LIBRARIES}
-            reader
-            arrow_shared
-            parquet_shared
-            -lstdc++fs
-            nlohmann_json::nlohmann_json
-            )
-    add_dependencies(recorder2parquet-workflow-vani reader)
-    install(
-            TARGETS
-            recorder2parquet-workflow-vani
-            EXPORT
-            ${RECORDER_EXPORTED_TARGETS}
-            LIBRARY DESTINATION ${RECORDER_INSTALL_LIB_DIR}
-            ARCHIVE DESTINATION ${RECORDER_INSTALL_LIB_DIR}
-            RUNTIME DESTINATION ${RECORDER_INSTALL_BIN_DIR}
     )
 endif()
 
