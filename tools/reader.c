@@ -161,13 +161,13 @@ void recorder_free_record(Record* r) {
     free(r);
 }
 
-void recorder_read_cst(RecorderReader *reader, int rank, CST *cst) {
+int recorder_read_cst(RecorderReader *reader, int rank, CST *cst) {
     cst->rank = rank;
     char cst_filename[1096] = {0};
     sprintf(cst_filename, "%s/%d.cst", reader->logs_dir, rank);
 
     FILE* f = fopen(cst_filename, "rb");
-
+    if (f == NULL) return 0;
     int key_len;
     fread(&cst->entries, sizeof(int), 1, f);
 
@@ -183,7 +183,7 @@ void recorder_read_cst(RecorderReader *reader, int rank, CST *cst) {
         assert(cst->cs_list[i].terminal_id < cst->entries);
     }
     fclose(f);
-
+    return cst->entries;
     //for(int i = 0; i < cst->entries; i++)
     //    printf("%d, terminal %d, key len: %d\n", i, cst->cs_list[i].terminal_id, cst->cs_list[i].key_len);
 }

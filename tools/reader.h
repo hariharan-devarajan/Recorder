@@ -95,7 +95,7 @@ void recorder_free_reader(RecorderReader *reader);
  * Read rank-local CST and CFG
  * We have one CST and one CFG file per process
  */
-void recorder_read_cst(RecorderReader *reader, int rank, CST *cst);
+int recorder_read_cst(RecorderReader *reader, int rank, CST *cst);
 void recorder_free_cst(CST *cst);
 void recorder_read_cfg(RecorderReader *reader, int rank, CFG *cfg);
 void recorder_free_cfg(CFG *cfg);
