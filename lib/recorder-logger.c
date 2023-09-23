@@ -3,169 +3,48 @@
 #include <stdlib.h>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <sys/time.h>
 #include <errno.h>
 #include "recorder.h"
+#include "recorder-pattern-recognition.h"
+#ifdef RECORDER_ENABLE_CUDA_TRACE
+#include "recorder-cuda-profiler.h"
+#endif
 
+#define VERSION_STR             "2.5.0"
+#define DEFAULT_TS_BUFFER_SIZE  (1*1024*1024)       // 1MB
 
-#define TIME_RESOLUTION 0.000001
-#define RECORD_WINDOW_SIZE 3                    // A sliding window for peephole compression
-#define MEMBUF_SIZE 6*1024*1024                 // Memory buffer size, default 6MB
-#define VERSION_STR "2.2.1"
 
 pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool initialized = false;
 
-struct RecorderLogger {
-    int rank;
-    FILE *trace_file;                           // log file
-    FILE *meta_file;                            // metadata file
-    double startTimestamp;
-    RecorderLocalDef localDef;                  // Local metadata information
-    CompressionMode compMode;                   // Compression Mode
-    Record* recordWindow[RECORD_WINDOW_SIZE];   // For Recorder Compression Mode
-};
+static RecorderLogger logger;
 
-/*
- * Memery buffer to hold records. Write out when its full
+/**
+ * Per-thread FIFO record stack
+ * pthread_t tid as key
+ *
+ * To store cascading calls in tstart order
+ * e.g., H5Dwrite -> MPI_File_write_at -> pwrite
  */
-struct MemBuf {
-    void *buffer;
-    int size;
-    int pos;
+struct RecordStack {
+    int level;
+    pthread_t tid;
+    Record *records;
+    UT_hash_handle hh;
 };
+static struct RecordStack *g_record_stack = NULL;
 
-
-
-// Global objects
-struct RecorderLogger logger;
-struct MemBuf membuf;
-
-// External global values, initialized here
-bool __recording;
-
-
-void membuf_dump(struct MemBuf *membuf) {
-    RECORDER_REAL_CALL(fwrite) (membuf->buffer, 1, membuf->pos, logger.trace_file);
-    membuf->pos = 0;
-}
-void membuf_init(struct MemBuf* membuf) {
-    membuf->buffer = recorder_malloc(MEMBUF_SIZE);
-    membuf->pos = 0;
-}
-void membuf_destroy(struct MemBuf *membuf) {
-    if(membuf->pos > 0)
-        membuf_dump(membuf);
-    recorder_free(membuf->buffer, MEMBUF_SIZE);
-}
-void membuf_append(struct MemBuf* membuf, const void *ptr, int length) {
-    if (length >= membuf->size) {
-        membuf_dump(membuf);
-        RECORDER_REAL_CALL(fwrite) (ptr, 1, length, logger.trace_file);
-        return;
-    }
-    if (membuf->pos + length >= membuf->size) {
-        membuf_dump(membuf);
-    }
-    memcpy(membuf->buffer+membuf->pos, ptr, length);
-    membuf->pos += length;
-}
-
-
-
-
-
-static inline int startsWith(const char *pre, const char *str) {
-    size_t lenpre = strlen(pre),
-           lenstr = strlen(str);
-    return lenstr < lenpre ? 0 : memcmp(pre, str, lenpre) == 0;
-}
-
-
-Record* get_diff_record(Record *old_record, Record *new_record) {
-    Record *diff_record = recorder_malloc(sizeof(Record)) ;
-    diff_record->status = 0b10000000;
-
-    // Get the number of different arguments
-    int total_args = old_record->arg_count;
-    int diff_args = 0;
-    int i;
-    for(i = 0; i < total_args; i++)
-        if(strcmp(old_record->args[i], new_record->args[i]) !=0)
-            diff_args++;
-
-    // record.args store only the different arguments
-    // record.status keeps track the position of different arguments
-    diff_record->arg_count = diff_args;
-    int idx = 0;
-    diff_record->args = recorder_malloc(sizeof(char *) * diff_args);
-    static char diff_bits[] = {0b10000001, 0b10000010, 0b10000100, 0b10001000,
-                                0b10010000, 0b10100000, 0b11000000};
-    for(i = 0; i < total_args; i++) {
-        if(strcmp(old_record->args[i], new_record->args[i]) !=0) {
-            diff_record->args[idx++] = strdup(new_record->args[i]);
-            diff_record->status = diff_record->status | diff_bits[i];
-        }
-    }
-    return diff_record;
-}
-
-// 0. Helper function, write all function arguments
-void write_record_arguments(FILE* f, Record *record) {
-    int arg_count = record->arg_count;
-    char **args = record->args;
-
-    char invalid_str[] = "???";
-    int i, j;
-    for(i = 0; i < arg_count; i++) {
-        membuf_append(&membuf, " ", 1);
-        if(args[i]) {
-            for(j = 0; j < strlen(args[i]); j++)
-                if(args[i][j] == ' ') args[i][j] = '_';
-            membuf_append(&membuf, args[i], strlen(args[i]));
-        } else
-            membuf_append(&membuf, invalid_str, strlen(invalid_str));
-    }
-    membuf_append(&membuf, "\n", 1);
-}
-
-/* Mode 1. Write record in plan text format */
-// tstart tend function args...
-void write_in_text(Record *record) {
-    FILE *f = logger.trace_file;
-    const char* func = get_function_name_by_id(record->func_id);
-    char* tstart = ftoa(record->tstart);
-    char* tend = ftoa(record->tend);
-    char* res = itoa(record->res);
-    membuf_append(&membuf, tstart, strlen(tstart));
-    membuf_append(&membuf, " ", 1);
-    membuf_append(&membuf, tend, strlen(tend));
-    membuf_append(&membuf, " ", 1);
-    membuf_append(&membuf, res, strlen(res));
-    membuf_append(&membuf, " ", 1);
-    membuf_append(&membuf, func, strlen(func));
-    write_record_arguments(f, record);
-}
-
-// Mode 2. Write in binary format, no compression
-void write_in_binary(Record *record) {
-    FILE *f = logger.trace_file;
-    int tstart = (record->tstart - logger.startTimestamp) / TIME_RESOLUTION;
-    int tend   = (record->tend - logger.startTimestamp) / TIME_RESOLUTION;
-    membuf_append(&membuf, &(record->status), sizeof(record->status));
-    membuf_append(&membuf, &tstart, sizeof(tstart));
-    membuf_append(&membuf, &tend, sizeof(tend));
-    membuf_append(&membuf, &(record->res), sizeof(record->res));
-    membuf_append(&membuf, &(record->func_id), sizeof(record->func_id));
-    write_record_arguments(f, record);
-}
 
 void free_record(Record *record) {
     if(record == NULL)
         return;
 
     if(record->args) {
-        int i;
-        for(i = 0; i < record->arg_count; i++)
-            free(record->args[i]);
+        for(int i = 0; i < record->arg_count; i++)
+            free(record->args[i]);  // note here we don't use recorder_free
+                                    // because the memory was potentially
+                                    // allocated by realpath(), strdup() other system calls.
         recorder_free(record->args, sizeof(char*)*record->arg_count);
     }
 
@@ -173,205 +52,313 @@ void free_record(Record *record) {
     recorder_free(record, sizeof(Record));
 }
 
-// Mode 3. Write in Recorder format (binary + peephole compression)
-void write_in_recorder(Record *new_record) {
+void write_record(Record *record) {
+
+    // Before pass the record to compose_cs_key()
+    // set them to 0 if not needed.
+    // TODO: this is a ugly fix for ignoring them, but
+    // they still occupy the space in the key.
+    if(!logger.log_tid)
+        record->tid   = 0;
+    if(!logger.log_level)
+        record->level = 0;
+
+    int key_len;
+    char* key = compose_cs_key(record, &key_len);
+
     pthread_mutex_lock(&g_mutex);
 
-    bool compress = false;
-    Record *diff_record = NULL;
-    int min_diff_count = new_record->arg_count;
-    char ref_window_id;
-    int i;
-    for(i = 0; i < RECORD_WINDOW_SIZE; i++) {
-        Record *old_record = logger.recordWindow[i];
-        if(old_record == NULL) break;
-
-        // Only meets the following conditions that we consider to compress it:
-        // 1. same function as the one in sliding window
-        // 2. have same number of arguments; have only 1 ~ 7 arguments
-        // 3. the number of different arguments is less the number of total arguments
-        if ((old_record->func_id == new_record->func_id) &&
-            (new_record->arg_count == old_record->arg_count) &&
-            (new_record->arg_count < 8) && (new_record->arg_count > 0)) {
-
-            Record *tmp_record = get_diff_record(old_record, new_record);
-
-            // Currently has the minimum number of different arguments
-            if(tmp_record->arg_count < min_diff_count) {
-                free_record(diff_record);
-
-                min_diff_count = tmp_record->arg_count;
-                diff_record = tmp_record;
-                ref_window_id = i;
-                compress = true;
-                break;
-            } else {
-                free_record(tmp_record);
-            }
-        }
+    CallSignature *entry = NULL;
+    HASH_FIND(hh, logger.cst, key, key_len, entry);
+    if(entry) {                         // Found
+        entry->count++;
+        recorder_free(key, key_len);
+    } else {                            // Not exist, add to hash table
+        entry = (CallSignature*) recorder_malloc(sizeof(CallSignature));
+        entry->key = key;
+        entry->key_len = key_len;
+        entry->rank = logger.rank;
+        entry->terminal_id = logger.current_cfg_terminal++;
+        entry->count = 1;
+        HASH_ADD_KEYPTR(hh, logger.cst, entry->key, entry->key_len, entry);
     }
 
-    if (compress) {
-        diff_record->tstart = new_record->tstart;
-        diff_record->tend = new_record->tend;
-        diff_record->func_id = ref_window_id;
-        diff_record->res = new_record->res;
-        write_in_binary(diff_record);
-    } else {
-        new_record->status = 0b00000000;
-        write_in_binary(new_record);
+    append_terminal(&logger.cfg, entry->terminal_id, 1);
+
+    // write timestamps
+    uint32_t delta_tstart = (record->tstart-logger.prev_tstart) / logger.ts_resolution;
+    uint32_t delta_tend   = (record->tend-logger.prev_tstart)   / logger.ts_resolution;
+    logger.prev_tstart = record->tstart;
+    logger.ts[logger.ts_index++] = delta_tstart;
+    logger.ts[logger.ts_index++] = delta_tend;
+    if(logger.ts_index == logger.ts_max_elements) {
+        if(!logger.directory_created)
+            logger_set_mpi_info(0, 1);
+        RECORDER_REAL_CALL(fwrite)(logger.ts, sizeof(uint32_t), logger.ts_max_elements, logger.ts_file);
+        logger.ts_index = 0;
     }
-
-    // Free the oldest record in the window
-    free_record(diff_record);
-    free_record(logger.recordWindow[RECORD_WINDOW_SIZE-1]);
-
-    // Move the sliding window
-    for(i = RECORD_WINDOW_SIZE-1; i > 0; i--)
-        logger.recordWindow[i] = logger.recordWindow[i-1];
-    logger.recordWindow[0] = new_record;
 
     pthread_mutex_unlock(&g_mutex);
 }
 
+void logger_record_enter(Record* record) {
+    struct RecordStack *rs;
+    HASH_FIND(hh, g_record_stack, &record->tid, sizeof(pthread_t), rs);
+    if(!rs) {
+        rs = recorder_malloc(sizeof(struct RecordStack));
+        rs->records = NULL;
+        rs->level = 0;
+        rs->tid = record->tid;
+        HASH_ADD(hh, g_record_stack, tid, sizeof(pthread_t), rs);
+    }
 
-void write_record(Record *record) {
-    logger.localDef.total_records++;
-    logger.localDef.function_count[record->func_id]++;
+    DL_APPEND(rs->records, record);
 
-    switch(logger.compMode) {
-        case COMP_TEXT:     // 0
-            write_in_text(record);
-            free_record(record);
-            break;
-        case COMP_BINARY:   // 1
-            write_in_binary(record);
-            free_record(record);
-            break;
-        default:            // 2, default if compMode not set
-            write_in_recorder(record);
-            break;
+    record->level = rs->level++;
+    record->record_stack = rs;
+}
+
+void logger_record_exit(Record* record) {
+    struct RecordStack *rs = record->record_stack;
+    rs->level--;
+
+    // In most cases, rs->level is 0 and
+    // rs->records have only one record
+    if(rs->level == 0) {
+        Record *current, *tmp;
+        DL_FOREACH_SAFE(rs->records, current, tmp) {
+            DL_DELETE(rs->records, current);
+            write_record(current);
+            free_record(current);
+        }
     }
 }
 
-void logger_init(int rank, int nprocs) {
+
+bool logger_initialized() {
+    return initialized;
+}
+
+// Traces dir: recorder-YYYYMMDD/appname-username-HHmmSS.fff
+void create_traces_dir() {
+    if(logger.rank != 0) return;
+
+    time_t t = time(NULL);
+    struct tm tm = *localtime(&t);
+
+    char* traces_dir = alloca(800);
+    char* tmp = realrealpath("/proc/self/exe");
+    char* exec_name = basename(tmp);
+    char* user_name = getlogin();
+
+    long unsigned int pid = (long unsigned int)getpid();
+    char hostname[64] = {0};
+    gethostname(hostname, 64);
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+
+    sprintf(traces_dir, "recorder-%d%02d%02d/%s-%s-%s-%lu-%02d%02d%02d.%03d/",
+            tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, hostname, user_name,
+            exec_name, pid, tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(tv.tv_usec/1000));
+    free(tmp);
+
+    const char* base_dir = getenv(RECORDER_TRACES_DIR);
+    if(base_dir)
+        sprintf(logger.traces_dir, "%s/%s", base_dir, traces_dir);
+    else
+        strcpy(logger.traces_dir, realrealpath(traces_dir)); // current directory
+
+    if(RECORDER_REAL_CALL(access) (logger.traces_dir, F_OK) != -1)
+        RECORDER_REAL_CALL(rmdir) (logger.traces_dir);
+    mkpath(logger.traces_dir, S_IRWXU|S_IRWXG|S_IROTH|S_IXOTH);
+}
+
+
+void logger_set_mpi_info(int mpi_rank, int mpi_size) {
+
+    logger.rank   = mpi_rank;
+    logger.nprocs = mpi_size;
+
+    int mpi_initialized;
+    PMPI_Initialized(&mpi_initialized);      // MPI_Initialized() is not intercepted
+    if(mpi_initialized)
+        RECORDER_REAL_CALL(PMPI_Bcast) (&logger.start_ts, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    // Create traces directory
+    create_traces_dir();
+
+    // Rank 0 broadcasts the trace direcotry path
+    if(mpi_initialized)
+        RECORDER_REAL_CALL(PMPI_Bcast) (logger.traces_dir, sizeof(logger.traces_dir), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    sprintf(logger.cst_path, "%s/%d.cst", logger.traces_dir, mpi_rank);
+    sprintf(logger.cfg_path, "%s/%d.cfg", logger.traces_dir, mpi_rank);
+
+    if(mpi_initialized)
+        RECORDER_REAL_CALL(PMPI_Barrier) (MPI_COMM_WORLD);
+
+    char ts_filename[1024];
+    sprintf(ts_filename, "%s/%d.ts", logger.traces_dir, mpi_rank);
+    logger.ts_file = RECORDER_REAL_CALL(fopen) (ts_filename, "wb");
+
+    logger.directory_created = true;
+}
+
+
+void logger_init() {
     // Map the functions we will use later
     // We did not intercept fprintf
     MAP_OR_FAIL(fopen);
+    MAP_OR_FAIL(fflush);
     MAP_OR_FAIL(fclose);
     MAP_OR_FAIL(fwrite);
-    MAP_OR_FAIL(remove);
+    MAP_OR_FAIL(rmdir);
     MAP_OR_FAIL(access);
-    MAP_OR_FAIL(mkdir);
     MAP_OR_FAIL(PMPI_Barrier);
+    MAP_OR_FAIL(PMPI_Bcast);
+    MAP_OR_FAIL(PMPI_Recv);
+    MAP_OR_FAIL(PMPI_Send);
+
+    double global_tstart = recorder_wtime();
+
+    // Initialize CUDA profiler
+    #ifdef RECORDER_ENABLE_CUDA_TRACE
+    cuda_profiler_init();
+    #endif
 
     // Initialize the global values
-    logger.rank = rank;
-    logger.startTimestamp = recorder_wtime();
-    int i;
-    for(i = 0; i < RECORD_WINDOW_SIZE; i++)
-        logger.recordWindow[i] = NULL;
+    logger.rank   = 0;
+    logger.nprocs = 1;
+    logger.start_ts = global_tstart;
+    logger.prev_tstart = logger.start_ts;
+    logger.cst = NULL;
+    sequitur_init(&logger.cfg);
+    logger.current_cfg_terminal = 0;
+    logger.directory_created = false;
+    logger.log_tid   = 0;
+    logger.log_level = 1;
+    logger.interprocess_compression = 0;
+
+    // ts buffer size in MB
+    const char* buffer_size_str = getenv(RECORDER_BUFFER_SIZE);
+    size_t buffer_size = DEFAULT_TS_BUFFER_SIZE;
+    if(buffer_size_str)
+        buffer_size = atoi(buffer_size_str) * 1024 * 1024;
+
+    logger.ts = recorder_malloc(buffer_size);
+    logger.ts_max_elements = buffer_size / sizeof(uint32_t);    // make sure its can be divided by 2
+    if(logger.ts_max_elements % 2 != 0) logger.ts_max_elements += 1;
+    logger.ts_index = 0;
+    logger.ts_resolution = 1e-7; // 100ns
+
+    const char* time_resolution_str = getenv(RECORDER_TIME_RESOLUTION);
+    if(time_resolution_str)
+        logger.ts_resolution = atof(time_resolution_str);
 
 
-    const char* base_dir = getenv("RECORDER_TRACES_DIR");
-    char traces_dir[1024] = {0};
-    char logfile_name[1024] = {0};
-    char metafile_name[1024] = {0};
-    char global_meta_filename[1024] = {0};
-    if(base_dir)
-        sprintf(traces_dir, "%s/recorder-logs", base_dir);
-    else
-        sprintf(traces_dir, "recorder-logs"); // current directory
-    sprintf(logfile_name, "%s/%d.itf", traces_dir, rank);
-    sprintf(metafile_name, "%s/%d.mt", traces_dir, rank);
-    sprintf(global_meta_filename, "%s/recorder.mt", traces_dir);
-
-    if(rank == 0) {
-        if(RECORDER_REAL_CALL(access)  (traces_dir, F_OK) != -1)
-            RECORDER_REAL_CALL(remove) (traces_dir);
-        RECORDER_REAL_CALL(mkdir) (traces_dir, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
-    }
-    RECORDER_REAL_CALL(PMPI_Barrier) (MPI_COMM_WORLD);
+    const char* log_tid_str = getenv(RECORDER_LOG_TID);
+    if(log_tid_str)
+        logger.log_tid = atoi(log_tid_str);
+    const char* log_level_str = getenv(RECORDER_LOG_LEVEL);
+    if(log_level_str)
+        logger.log_level = atoi(log_level_str);
+    const char* interprocess_compression = getenv(RECORDER_INTERPROCESS_COMPRESSION);
+    if(interprocess_compression)
+        logger.interprocess_compression = atoi(interprocess_compression);
 
 
-    logger.trace_file = RECORDER_REAL_CALL(fopen) (logfile_name, "wb");
-    logger.meta_file = RECORDER_REAL_CALL(fopen) (metafile_name, "wb");
-
-    // Global metadata, include compression mode, time resolution
-    logger.compMode = COMP_RECORDER;
-    const char* comp_mode = getenv("RECORDER_COMPRESSION_MODE");
-    if (comp_mode) logger.compMode = atoi(comp_mode);
-
-    if (rank == 0) {
-        FILE* global_metafh = RECORDER_REAL_CALL(fopen) (global_meta_filename, "wb");
-        RecorderGlobalDef global_def = {
-            .time_resolution = TIME_RESOLUTION,
-            .total_ranks = nprocs,
-            .compression_mode = logger.compMode,
-            .peephole_window_size = RECORD_WINDOW_SIZE
-        };
-        RECORDER_REAL_CALL(fwrite)(&global_def, sizeof(RecorderGlobalDef), 1, global_metafh);
-
-        unsigned int i;
-        for(i = 0; i < sizeof(func_list)/sizeof(char*); i++) {
-            const char *funcname = get_function_name_by_id(i);
-            if(strstr(funcname, "PMPI_"))       // replace PMPI with MPI
-                RECORDER_REAL_CALL(fwrite)(funcname+1, strlen(funcname)-1, 1, global_metafh);
-            else
-                RECORDER_REAL_CALL(fwrite)(funcname, strlen(funcname), 1, global_metafh);
-            RECORDER_REAL_CALL(fwrite)("\n", sizeof(char), 1, global_metafh);
-        }
-        RECORDER_REAL_CALL(fclose)(global_metafh);
-
-        char version_filename[1024];
-        sprintf(version_filename, "%s/VERSION", traces_dir);
-        FILE* version_file = RECORDER_REAL_CALL(fopen) (version_filename, "w");
-        RECORDER_REAL_CALL(fwrite) (VERSION_STR, 5, 1, version_file);
-        RECORDER_REAL_CALL(fclose)(version_file);
-    }
-
-    membuf_init(&membuf);
-    __recording = true;     // set the extern globals
+    initialized = true;
 }
 
+void cleanup_record_stack() {
+    struct RecordStack *rs, *tmp;
+    HASH_ITER(hh, g_record_stack, rs, tmp) {
+        HASH_DEL(g_record_stack, rs);
+        assert(rs->records == NULL);
+        recorder_free(rs, sizeof(struct RecordStack));
+    }
+}
+
+void save_global_metadata() {
+    if (logger.rank != 0) return;
+
+    char metadata_filename[1024] = {0};
+    sprintf(metadata_filename, "%s/recorder.mt", logger.traces_dir);
+    FILE* metafh = RECORDER_REAL_CALL(fopen) (metadata_filename, "wb");
+    RecorderMetadata metadata = {
+        .time_resolution     = logger.ts_resolution,
+        .total_ranks         = logger.nprocs,
+        .start_ts            = logger.start_ts,
+        .ts_buffer_elements  = logger.ts_max_elements,
+        .ts_compression_algo = TS_COMPRESSION_NO,
+        .interprocess_compression = logger.interprocess_compression,
+    };
+    RECORDER_REAL_CALL(fwrite)(&metadata, sizeof(RecorderMetadata), 1, metafh);
+
+    for(int i = 0; i < sizeof(func_list)/sizeof(char*); i++) {
+        const char *funcname = get_function_name_by_id(i);
+        if(strstr(funcname, "PMPI_"))       // replace PMPI with MPI
+            RECORDER_REAL_CALL(fwrite)(funcname+1, strlen(funcname)-1, 1, metafh);
+        else
+            RECORDER_REAL_CALL(fwrite)(funcname, strlen(funcname), 1, metafh);
+        RECORDER_REAL_CALL(fwrite)("\n", sizeof(char), 1, metafh);
+    }
+    RECORDER_REAL_CALL(fflush)(metafh);
+    RECORDER_REAL_CALL(fclose)(metafh);
+
+    char version_filename[1024];
+    sprintf(version_filename, "%s/VERSION", logger.traces_dir);
+    FILE* version_file = RECORDER_REAL_CALL(fopen) (version_filename, "w");
+    RECORDER_REAL_CALL(fwrite) (VERSION_STR, 5, 1, version_file);
+    RECORDER_REAL_CALL(fflush)(version_file);
+    RECORDER_REAL_CALL(fclose)(version_file);
+}
 
 void logger_finalize() {
-    __recording = false;    // set the extern global
 
-    int i;
-    for(i = 0; i < RECORD_WINDOW_SIZE; i++)
-        free_record(logger.recordWindow[i]);
+    if(!logger.directory_created)
+        logger_set_mpi_info(0, 1);
 
-    /* Write out local metadata information */
-    FilenameHashTable* filename_table = get_filename_map();
-    logger.localDef.num_files = HASH_COUNT(filename_table);
-    logger.localDef.start_timestamp = logger.startTimestamp;
-    logger.localDef.end_timestamp = recorder_wtime();
-    RECORDER_REAL_CALL(fwrite) (&logger.localDef, sizeof(logger.localDef), 1, logger.meta_file);
+    initialized = false;
 
-    /* Write out filename mappings, we call stat() to get file size
-     * since is already closed (null), the stat() function
-     * won't be intercepted. */
-    FilenameHashTable *item, *tmp;
-    int id = 0;
-    HASH_ITER(hh, filename_table, item, tmp) {
-        int filename_len = strlen(item->name);
-        size_t file_size = get_file_size(item->name);
-        RECORDER_REAL_CALL(fwrite) (&id, sizeof(id), 1, logger.meta_file);
-        RECORDER_REAL_CALL(fwrite) (&file_size, sizeof(file_size), 1, logger.meta_file);
-        RECORDER_REAL_CALL(fwrite) (&filename_len, sizeof(filename_len), 1, logger.meta_file);
-        RECORDER_REAL_CALL(fwrite) (item->name, sizeof(char), filename_len, logger.meta_file);
-        id++;
+    #ifdef RECORDER_ENABLE_CUDA_TRACE
+    cuda_profiler_exit();
+    #endif
+
+    if(logger.ts_index > 0)
+        RECORDER_REAL_CALL(fwrite)(logger.ts, sizeof(int), logger.ts_index, logger.ts_file);
+
+    RECORDER_REAL_CALL(fflush)(logger.ts_file);
+    RECORDER_REAL_CALL(fclose)(logger.ts_file);
+    recorder_free(logger.ts, sizeof(uint32_t)*logger.ts_max_elements);
+
+    /*
+    interprocess_pattern_recognition("lseek64");
+    interprocess_pattern_recognition("lseek");
+    interprocess_pattern_recognition("pread");
+    interprocess_pattern_recognition("PMPI_File_write_at");
+    interprocess_pattern_recognition("PMPI_File_read_at");
+    */
+    //interprocess_pattern_recognition(&logger, "PMPI_File_write_at", 1);
+    //interprocess_pattern_recognition(&logger, "pwrite", 3);
+
+    cleanup_record_stack();
+    if(logger.interprocess_compression) {
+        save_cst_merged(&logger);
+        save_cfg_merged(&logger);
+    } else {
+        save_cst_local(&logger);
+        save_cfg_local(&logger);
     }
+    cleanup_cst(logger.cst);
+    sequitur_cleanup(&logger.cfg);
 
-    membuf_destroy(&membuf);
+    if(logger.rank == 0) {
+        save_global_metadata();
 
-    if ( logger.trace_file) {
-        RECORDER_REAL_CALL(fclose) (logger.trace_file);
-        logger.trace_file = NULL;
-    }
-    if ( logger.meta_file) {
-        RECORDER_REAL_CALL(fclose) (logger.meta_file);
-        logger.meta_file = NULL;
+        fprintf(stderr, "[Recorder] trace files have been written to %s\n", logger.traces_dir);
+        RECORDER_REAL_CALL(fflush)(stderr);
     }
 }
+

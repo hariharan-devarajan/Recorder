@@ -45,6 +45,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdarg.h>
 #include <dirent.h>
 #include <utime.h>
 #include <fcntl.h>
@@ -55,7 +56,7 @@
 #include "hdf5.h"
 #include "uthash.h"
 #include "recorder-utils.h"
-#include "recorder-log-format.h"
+#include "recorder-logger.h"
 
 #define __D_MPI_REQUEST MPIO_Request
 #if MPI_VERSION >= 3
@@ -64,13 +65,18 @@
 #define CONST
 #endif
 
-extern bool __recording;                                // Only true after init() before exit() so we won't track unwanted functions and files
+/* List of runtime environment variables */
+#define RECORDER_WITH_NON_MPI       		"RECORDER_WITH_NON_MPI"
+#define RECORDER_TRACES_DIR         		"RECORDER_TRACES_DIR"
+#define RECORDER_BUFFER_SIZE        		"RECORDER_BUFFER_SIZE"
+#define RECORDER_TIME_RESOLUTION    		"RECORDER_TIME_RESOLUTION"
+#define RECORDER_LOG_POINTER        		"RECORDER_LOG_POINTER"
+#define RECORDER_LOG_TID            		"RECORDER_LOG_TID"
+#define RECORDER_INTERPROCESS_COMPRESSION	"RECORDER_INTERPROCESS_COMPRESSION"
+#define RECORDER_LOG_LEVEL          		"RECORDER_LOG_LEVEL"
+#define RECORDER_EXCLUSION_FILE     		"RECORDER_EXCLUSION_FILE"
+#define RECORDER_INCLUSION_FILE     		"RECORDER_INCLUSION_FILE"
 
-/* logger.c */
-void logger_init(int rank, int nprocs);
-void logger_finalize();
-void free_record(Record *record);
-void write_record(Record *record);
 
 
 #ifdef RECORDER_PRELOAD
@@ -106,26 +112,33 @@ void write_record(Record *record);
  * Decide wether to intercept (override) funciton calls
  */
 #ifdef RECORDER_PRELOAD
-    #ifndef DISABLE_MPIO_TRACE
-        #define RECORDER_MPI_DECL(func) func
-    #else
-        #define RECORDER_MPI_DECL(func) __warp_##func
-    #endif
-
-    #ifndef DISABLE_POSIX_TRACE
+    #ifdef RECORDER_ENABLE_POSIX_TRACE
         #define RECORDER_POSIX_DECL(func) func
     #else
         #define RECORDER_POSIX_DECL(func) __warp_##func
     #endif
 
-    #ifndef DISABLE_HDF5_TRACE
+    #ifdef RECORDER_ENABLE_MPI_TRACE
+        #define RECORDER_MPI_DECL(func) func
+    #else
+        #define RECORDER_MPI_DECL(func) __warp_##func
+    #endif
+
+    #ifdef RECORDER_ENABLE_MPIIO_TRACE
+        #define RECORDER_MPIIO_DECL(func) func
+    #else
+        #define RECORDER_MPIIO_DECL(func) __warp_##func
+    #endif
+
+    #ifdef RECORDER_ENABLE_HDF5_TRACE
         #define RECORDER_HDF5_DECL(func) func
     #else
         #define RECORDER_HDF5_DECL(func) __warp_##func
     #endif
 #else
-    #define RECORDER_MPI_DECL(func) func
     #define RECORDER_POSIX_DECL(func) func
+    #define RECORDER_MPI_DECL(func) func
+    #define RECORDER_MPIIO_DECL(func) func
     #define RECORDER_HDF5_DECL(func) func
 #endif
 
@@ -144,17 +157,34 @@ void write_record(Record *record);
  * can change the fields, e.g., fopen will convert the FILE* to an integer res.
  *
  */
-#define RECORDER_INTERCEPTOR_NOIO(ret, func, real_args)                             \
-    MAP_OR_FAIL(func)                                                               \
-    double tstart = recorder_wtime();                                               \
-    ret res = RECORDER_REAL_CALL(func) real_args ;                                  \
-    double tend = recorder_wtime();                                                 \
+#define RECORDER_INTERCEPTOR_PROLOGUE_CORE(ret, func, real_args)                    \
     Record *record = recorder_malloc(sizeof(Record));                               \
-    record->tstart = tstart;                                                        \
     record->func_id = get_function_id_by_name(#func);                               \
-    record->tend = tend;                                                            \
-    record->res = 0;
+    record->tid = recorder_gettid();                                                \
+    logger_record_enter(record);                                                    \
+    record->tstart = recorder_wtime();                                              \
+    ret res = RECORDER_REAL_CALL(func) real_args ;                                  \
+    record->tend = recorder_wtime();
 
+// Fortran wrappers call this
+// ierr is of type MPI_Fint*, set only for fortran calls
+#define RECORDER_INTERCEPTOR_PROLOGUE_F(ret, func, real_args, ierr)                 \
+    MAP_OR_FAIL(func)                                                               \
+    if(!logger_initialized()) {                                                     \
+        ret res = RECORDER_REAL_CALL(func) real_args ;                              \
+        if ((ierr) != NULL) { *(ierr) = res; }                                      \
+        return res;                                                                 \
+    }                                                                               \
+    RECORDER_INTERCEPTOR_PROLOGUE_CORE(ret, func, real_args)                        \
+    if ((ierr) != NULL) { *(ierr) = res; }
+
+// C wrappers call this
+#define RECORDER_INTERCEPTOR_PROLOGUE(ret, func, real_args)                         \
+    MAP_OR_FAIL(func)                                                               \
+    if(!logger_initialized()) {                                                     \
+        return RECORDER_REAL_CALL(func) real_args ;                                 \
+    }                                                                               \
+    RECORDER_INTERCEPTOR_PROLOGUE_CORE(ret, func, real_args)
 
 /**
  * I/O Interceptor
@@ -164,13 +194,10 @@ void write_record(Record *record);
  * Finally write out the record
  *
  */
-#define RECORDER_INTERCEPTOR(record_arg_count, record_args)                         \
+#define RECORDER_INTERCEPTOR_EPILOGUE(record_arg_count, record_args)                \
     record->arg_count = record_arg_count;                                           \
     record->args = record_args;                                                     \
-    if(!__recording)                                                                \
-        free_record(record);                                                        \
-    else                                                                            \
-        write_record(record);                                                       \
+    logger_record_exit(record);                                                     \
     return res;
 
 
@@ -199,6 +226,7 @@ RECORDER_FORWARD_DECL(fopen64, FILE *, (const char *path, const char *mode));
 RECORDER_FORWARD_DECL(fclose, int, (FILE * fp));
 RECORDER_FORWARD_DECL(fread, size_t, (void *ptr, size_t size, size_t nmemb, FILE *stream));
 RECORDER_FORWARD_DECL(fwrite, size_t, (const void *ptr, size_t size, size_t nmemb, FILE *stream));
+RECORDER_FORWARD_DECL(fflush, int, (FILE *stream));
 RECORDER_FORWARD_DECL(ftell, long, (FILE *stream));
 RECORDER_FORWARD_DECL(fseek, int, (FILE * stream, long offset, int whence));
 RECORDER_FORWARD_DECL(fsync, int, (int fd));

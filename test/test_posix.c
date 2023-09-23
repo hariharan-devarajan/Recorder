@@ -1,13 +1,12 @@
 #include <stdio.h>
 #include <sys/types.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <mpi.h>
 
 
 int main() {
-    MPI_Init(NULL, NULL);
 
     struct stat buf;
     int res;
@@ -39,7 +38,16 @@ int main() {
     a = 0;
     b = 10;
     fprintf(stderr, "hello world: %d %d\n", a, b);
-    MPI_Finalize();
+
+
+    DIR* dir = opendir("/sys");
+    struct dirent *dent = readdir(dir);
+    do {
+        printf("dent %s\n", dent->d_name);
+        dent = readdir(dir);
+    } while(dent);
+    closedir(dir);
+
 
     return 0;
 }

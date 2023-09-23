@@ -38,16 +38,19 @@
  * Prime Contract No. DE-AC02-05CH11231.
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef __RECORDER_LOG_FORMAT_H
-#define __RECORDER_LOG_FORMAT_H
+#ifndef __RECORDER_LOGGER_H
+#define __RECORDER_LOGGER_H
 
 #include <unistd.h>
 #include <sys/types.h>
 #include <stdint.h>
 #include <string.h>
+#include <uthash.h>
+#include <pthread.h>
 #ifdef HAVE_INTTYPES_H
 #include <inttypes.h>
 #endif
+#include "recorder-sequitur.h"
 
 #if !defined PRId64 || defined(PRI_MACROS_BROKEN)
 #ifndef __WORDSIZE
@@ -72,39 +75,125 @@
 #endif
 #endif
 
+#define TS_COMPRESSION_NO   0
+#define TS_COMPRESSION_ZLIB 1
+#define TS_COMPRESSION_ZFP  2
+
+#define RECORDER_USER_FUNCTION 255
+
+
+#define RECORDER_POSIX      0
+#define RECORDER_MPIIO      1
+#define RECORDER_MPI        2
+#define RECORDER_HDF5       3
+#define RECORDER_FTRACE     4
+
+
+
 /* For each function call in the trace file */
 typedef struct Record_t {
-    char status;                // peephole compressed or not
     double tstart, tend;
+    unsigned char level;
     unsigned char func_id;      // we have about 200 functions in total
-    int arg_count;
+    unsigned char arg_count;
     char **args;                // Store all arguments in array
-    int res;                    // result returned from the original function call
+    pthread_t tid;
+
+    void* record_stack;         // per-thread record stack of cascading calls
+    struct Record_t *prev, *next;
 } Record;
 
 
-// Compression method, use peephole compression by default
-enum CompressionMode_t { COMP_TEXT=0, COMP_BINARY=1, COMP_RECORDER=2, COMP_ZLIB=3 };
-typedef enum CompressionMode_t CompressionMode;
+/*
+ * Call Signature
+ */
+typedef struct CallSignature_t {
+    void *key;
+    int key_len;
+    int rank;
+    int terminal_id;
+    int count;
+    UT_hash_handle hh;
+} CallSignature;
 
 
-typedef struct RecorderGlobalDef_t {
+typedef struct RecorderMetadata_t {
+    int    total_ranks;
+    double start_ts;
     double time_resolution;
-    int total_ranks;
-    CompressionMode compression_mode;
-    int peephole_window_size;
-} RecorderGlobalDef;
+    int    ts_buffer_elements;
+    int    ts_compression_algo; // timestamp compression algorithm
+    int    interprocess_compression;
+} RecorderMetadata;
 
 
-typedef struct RecorderLocalDef_t {
-    double start_timestamp;
-    double end_timestamp;
-    int num_files;                  // number of files accessed by the rank
-    int total_records;              // total number of records we have written
-    char **filemap;                 // mapping of filenames and integer ids. only set when read the local def file
-    size_t *file_sizes;             // size of each file accessed. only set when read back the local def file
-    int function_count[256];        // counting the functions at runtime
-} RecorderLocalDef;
+/**
+ * Per-process CST and CFG
+ */
+typedef struct RecorderLogger_t {
+    int rank;
+    int nprocs;
+
+    bool directory_created;
+
+    int current_cfg_terminal;
+
+    Grammar        cfg;
+    CallSignature* cst;
+
+    char traces_dir[512];
+    char cst_path[1024];
+    char cfg_path[1024];
+
+    double    start_ts;
+    double    prev_tstart;      // delta compression for timestamps
+    FILE*     ts_file;
+    uint32_t* ts;               // memory buffer for timestamps (tstart, tend-tstart)
+    int       ts_index;         // current position of ts buffer, spill to file once full.
+    int       ts_max_elements;  // max elements can be stored in the buffer
+    double    ts_resolution;
+
+    int       log_tid;          // Wether to store thread id
+    int       log_level;        // Wether to store the level of the call
+    int       interprocess_compression; // Wether to perform interprocess compression
+} RecorderLogger;
+
+
+
+
+
+
+
+
+
+/* recorder-logger.c */
+void logger_init();
+void logger_set_mpi_info();
+void logger_finalize();
+bool logger_initialized();
+void logger_record_enter(Record *record);
+void logger_record_exit(Record *record);
+void free_record(Record *record);
+// TODO only used by ftrace logger
+// Need to see how to replace it
+void write_record(Record* record);
+
+
+/* recorder-cst-cfg.c */
+int  cs_key_args_start();
+int  cs_key_args_strlen(Record* record);
+int  cs_key_length(Record* record);
+char* compose_cs_key(Record *record, int* key_len);
+Record* cs_to_record(CallSignature* cs);
+void cleanup_cst(CallSignature* cst);
+void save_cst_local(RecorderLogger* logger);
+void save_cst_merged(RecorderLogger* logger);
+void save_cfg_local(RecorderLogger* logger);
+void save_cfg_merged(RecorderLogger* logger);
+
+
+
+
 
 
 
@@ -148,7 +237,7 @@ static const char* func_list[] = {
     "PMPI_Scan",                    "PMPI_Type_commit",         "PMPI_Type_contiguous",
     "PMPI_Type_extent",             "PMPI_Type_free",           "PMPI_Type_hindexed",
     "PMPI_Op_create",               "PMPI_Op_free",             "PMPI_Type_get_envelope",
-    "PMPI_Type_size",
+    "PMPI_Type_size",               "PMPI_Type_create_darray",
     // Added 2019/01/07
     "PMPI_Cart_rank",               "PMPI_Cart_create",         "PMPI_Cart_get",
     "PMPI_Cart_shift",              "PMPI_Wait",                "PMPI_Send",
@@ -201,4 +290,4 @@ static const char* func_list[] = {
     "H5Pset_all_coll_metadata_ops",                 "H5Pget_all_coll_metadata_ops"
 };
 
-#endif /* __RECORDER_LOG_FORMAT_H */
+#endif /* __RECORDER_LOGGER_H */

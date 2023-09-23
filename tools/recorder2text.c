@@ -3,50 +3,89 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <math.h>
+#include <mpi.h>
 #include "reader.h"
 
-/*
- * Write all original records (encoded and compressed) to text file
- */
-void write_to_textfile(const char* path, Record *records, int len, RecorderReader *reader) {
-    int i, arg_id;
+#define DECIMAL 6
 
-    FILE* out_file = fopen(path, "w");
-    for(i = 0; i < len; i++) {
-        Record record = records[i];
-        fprintf(out_file, "%f %f %d %s (", record.tstart, record.tend, record.res, reader->func_list[record.func_id]);
-        for(arg_id = 0; arg_id < record.arg_count; arg_id++) {
-            char *arg = record.args[arg_id];
-            fprintf(out_file, " %s", arg);
-        }
-        fprintf(out_file, " )\n");
-    }
-    fclose(out_file);
+RecorderReader reader;
+static char formatting_record[32];
+static char formatting_fname[20];
+
+int digits_count(int n) {
+    int digits = 0;
+    do {
+        n /= 10;
+        ++digits;
+    } while (n != 0);
+    return digits;
 }
+
+void write_to_textfile(Record *record, void* arg) {
+    FILE* f = (FILE*) arg;
+
+    bool user_func = (record->func_id == RECORDER_USER_FUNCTION);
+
+    const char* func_name = recorder_get_func_name(&reader, record);
+
+    fprintf(f, formatting_record, record->tstart, record->tend, // record->tid
+                             func_name, record->level, recorder_get_func_type(&reader, record));
+
+    for(int arg_id = 0; !user_func && arg_id < record->arg_count; arg_id++) {
+        char *arg = record->args[arg_id];
+        fprintf(f, " %s", arg);
+    }
+
+    fprintf(f, " )\n");
+}
+
+
+int min(int a, int b) { return a < b ? a : b; }
+int max(int a, int b) { return a > b ? a : b; }
 
 int main(int argc, char **argv) {
 
-    char textfile_dir[256], textfile_path[256];
+    char textfile_dir[256];
+    char textfile_path[256];
     sprintf(textfile_dir, "%s/_text", argv[1]);
-    //sprintf(textfile_dir, "./_text");
-    mkdir(textfile_dir, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
 
-    RecorderReader reader;
-    recorder_read_traces(argv[1], &reader);
+    int mpi_size, mpi_rank;
+    MPI_Init(&argc, &argv);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
 
-    int rank;
-    for(rank = 0; rank < reader.RGD.total_ranks; rank++) {
+    if(mpi_rank == 0)
+        mkdir(textfile_dir, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
+    MPI_Barrier(MPI_COMM_WORLD);
 
-        sprintf(textfile_path, "%s/%d.txt" , textfile_dir, rank);
+    recorder_init_reader(argv[1], &reader);
 
-        Record* records = reader.records[rank];
-        write_to_textfile(textfile_path, records, reader.RLDs[rank].total_records, &reader);
+    int decimal =  log10(1 / reader.metadata.time_resolution);
+    sprintf(formatting_record, "%%.%df %%.%df %%s %%d %%d (", decimal, decimal);
+    sprintf(formatting_fname,  "%%s/%%0%dd.txt", digits_count(reader.metadata.total_ranks));
 
-        printf("\rWrite out decoded trace file for rank %d\n", rank);
-        fflush(stdout);
+    // Each rank will process n files (n ranks traces)
+    int n = max(reader.metadata.total_ranks/mpi_size, 1);
+    int start_rank = n * mpi_rank;
+    int end_rank   = min(reader.metadata.total_ranks, n*(mpi_rank+1));
+
+    for(int rank = start_rank; rank < end_rank; rank++) {
+
+        sprintf(textfile_path, formatting_fname, textfile_dir, rank);
+        FILE* fout = fopen(textfile_path, "w");
+
+        recorder_decode_records(&reader, rank, write_to_textfile, fout);
+
+        fclose(fout);
+
+        printf("\r[Recorder] rank %d finished\n", rank);
     }
 
-    release_resources(&reader);
+    recorder_free_reader(&reader);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Finalize();
 
     return 0;
 }
